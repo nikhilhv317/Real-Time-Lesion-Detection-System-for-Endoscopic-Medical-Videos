@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lesion Detection Video Streaming</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f0f0f0; display: flex; flex-direction: column; align-items: center; }
+        h1 { color: #333; }
+        .container { max-width: 1200px; width: 100%; background: white; padding: 20px; border-radius: 8px; text-align: center; }
+        .video-container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
+        .video-box { flex: 1; min-width: 300px; max-width: 580px; }
+        video, img { width: 100%; height: auto; border-radius: 4px; border: 1px solid #ccc; }
+        input { margin: 10px 0; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; margin: 5px; }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        #error { color: red; margin-top: 10px; }
+        #status { color: #007bff; margin-top: 10px; }
+        #loading { display: none; color: #007bff; }
+        #format-warning { color: orange; margin-top: 10px; display: none; }
+        @media (max-width: 800px) { .video-container { flex-direction: column; } }
+    </style>
+</head>
+<body>
+    <h1>Upload Video for Lesion Detection</h1>
+    <div class="container">
+        <input type="file" id="videoInput" accept="video/mp4,video/avi,video/quicktime">
+        <button id="uploadButton" onclick="uploadVideo()">Upload</button>
+        <button id="playPauseButton" onclick="togglePlayPause()" disabled>Play Both</button>
+        <p id="status"></p>
+        <p id="error"></p>
+        <p id="format-warning">Warning: AVI may not play in some browsers (e.g., Chrome). Try Firefox.</p>
+        <div id="loading">Loading...</div>
+        <div class="video-container">
+            <div class="video-box">
+                <h3>Original Video (25 FPS)</h3>
+                <video id="originalVideo" controls muted>
+                    <source id="videoSource" src="" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+            </div>
+            <div class="video-box">
+                <h3>Processed Video (25 FPS)</h3>
+                <img id="processedVideo" src="" alt="Processed video stream">
+            </div>
+        </div>
+    </div>
+    <script>
+        const videoInput = document.getElementById('videoInput');
+        const uploadButton = document.getElementById('uploadButton');
+        const playPauseButton = document.getElementById('playPauseButton');
+        const originalVideo = document.getElementById('originalVideo');
+        const videoSource = document.getElementById('videoSource');
+        const processedVideo = document.getElementById('processedVideo');
+        const statusElement = document.getElementById('status');
+        const errorElement = document.getElementById('error');
+        const loadingText = document.getElementById('loading');
+        const formatWarning = document.getElementById('format-warning');
+        let currentFilename = '';
+        let syncInterval = null;
+        let streamRetryCount = 0;
+        const maxRetries = 2;
+        const retryDelay = 500;
+
+        function uploadVideo() {
+            const file = videoInput.files[0];
+            if (!file) { 
+                errorElement.textContent = 'Please select a video file.'; 
+                console.error('No file selected');
+                return; 
+            }
+            if (!['video/mp4', 'video/avi', 'video/quicktime'].includes(file.type)) {
+                errorElement.textContent = 'Please upload MP4, AVI, or MOV.';
+                console.error('Invalid file type:', file.type);
+                return;
+            }
+            if (file.size > 100 * 1024 * 1024) { 
+                errorElement.textContent = 'File too large (max 100MB).'; 
+                console.error('File too large:', file.size);
+                return; 
+            }
+            uploadButton.disabled = true;
+            playPauseButton.disabled = true;
+            errorElement.textContent = '';
+            statusElement.textContent = 'Uploading video...';
+            formatWarning.style.display = file.name.toLowerCase().endsWith('.avi') ? 'block' : 'none';
+            videoSource.src = '';
+            processedVideo.src = '';
+            originalVideo.load();
+            loadingText.style.display = 'block';
+            const formData = new FormData();
+            formData.append('file', file);
+            fetch('/upload', { method: 'POST', body: formData })
+                .then(response => {
+                    if (!response.ok) throw new Error(`Server error: ${response.status}`);
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.error) {
+                        errorElement.textContent = data.error;
+                        console.error('Upload error:', data.error);
+                        uploadButton.disabled = false;
+                        loadingText.style.display = 'none';
+                        return;
+                    }
+                    currentFilename = data.filename;
+                    videoSource.src = `/video/${currentFilename}`;
+                    videoSource.type = currentFilename.toLowerCase().endsWith('.avi') ? 'video/x-msvideo' : 'video/mp4';
+                    originalVideo.load();
+                    console.log('Video uploaded, filename:', currentFilename);
+                    originalVideo.addEventListener('canplay', () => {
+                        playPauseButton.disabled = false;
+                        statusElement.textContent = 'Upload successful. Ready to play both videos at 25 FPS.';
+                        console.log('Original video ready to play');
+                        processedVideo.src = '';
+                    }, { once: true });
+                    originalVideo.addEventListener('error', () => {
+                        errorElement.textContent = 'Error playing original video. Ensure MP4 is 25 FPS and encoded with H.264.';
+                        console.error('Original video error:', originalVideo.error);
+                    }, { once: true });
+                    processedVideo.addEventListener('error', () => {
+                        console.log(`Processed video stream error, retry ${streamRetryCount}/${maxRetries}, time: ${originalVideo.currentTime}`);
+                        if (streamRetryCount < maxRetries && currentFilename && !originalVideo.paused) {
+                            streamRetryCount++;
+                            statusElement.textContent = `Retrying processed video stream (${streamRetryCount}/${maxRetries})...`;
+                            setTimeout(() => {
+                                processedVideo.src = `/stream/${currentFilename}?t=${originalVideo.currentTime}`;
+                            }, retryDelay);
+                        } else {
+                            streamRetryCount = 0;
+                            statusElement.textContent = 'Both videos playing at 25 FPS.';
+                        }
+                    });
+                    loadingText.style.display = 'none';
+                    uploadButton.disabled = false;
+                })
+                .catch(error => {
+                    errorElement.textContent = `Upload failed: ${error.message}. Ensure server is running at http://localhost:5000.`;
+                    console.error('Upload error:', error);
+                    uploadButton.disabled = false;
+                    loadingText.style.display = 'none';
+                });
+        }
+
+        function togglePlayPause() {
+            if (currentFilename) {
+                if (originalVideo.paused) {
+                    // Start both videos
+                    console.log('Starting playback, time:', originalVideo.currentTime);
+                    originalVideo.playbackRate = 1.0;
+                    originalVideo.play().catch(err => {
+                        errorElement.textContent = `Play error: ${err.message}. Ensure MP4 is 25 FPS and encoded with H.264.`;
+                        console.error('Play error:', err);
+                    });
+                    streamRetryCount = 0;
+                    setTimeout(() => {
+                        processedVideo.src = `/stream/${currentFilename}?t=${originalVideo.currentTime}`;
+                    }, retryDelay);
+                    syncInterval = setInterval(() => {
+                        if (!originalVideo.paused && currentFilename) {
+                            const expectedTime = originalVideo.currentTime;
+                            const currentStreamTime = parseFloat(processedVideo.src.split('t=')[1] || 0);
+                            const frameTime = 1.0 / 25; // 40ms per frame
+                            if (Math.abs(expectedTime - currentStreamTime) > frameTime / 2) {
+                                console.log('Syncing processed video, time:', expectedTime);
+                                processedVideo.src = `/stream/${currentFilename}?t=${expectedTime}`;
+                            }
+                        }
+                    }, 500); // Reduced sync frequency
+                    playPauseButton.textContent = 'Pause Both';
+                    statusElement.textContent = 'Both videos playing at 25 FPS.';
+                } else {
+                    // Pause both videos
+                    console.log('Pausing playback, time:', originalVideo.currentTime);
+                    originalVideo.pause();
+                    processedVideo.src = ''; // Clear the stream to pause
+                    clearInterval(syncInterval);
+                    syncInterval = null;
+                    streamRetryCount = 0;
+                    playPauseButton.textContent = 'Play Both';
+                    statusElement.textContent = 'Both videos paused.';
+                }
+            } else {
+                errorElement.textContent = 'No video uploaded. Please upload a video first.';
+                console.error('No video uploaded for playback');
+            }
+        }
+
+        originalVideo.addEventListener('timeupdate', () => {
+            if (!originalVideo.paused && currentFilename) {
+                const expectedTime = originalVideo.currentTime;
+                const currentStreamTime = parseFloat(processedVideo.src.split('t=')[1] || 0);
+                const frameTime = 1.0 / 25; // 40ms per frame
+                if (Math.abs(expectedTime - currentStreamTime) > frameTime / 2) {
+                    console.log('Timeupdate sync, time:', expectedTime);
+                    processedVideo.src = `/stream/${currentFilename}?t=${expectedTime}`;
+                }
+            }
+        });
+
+        originalVideo.addEventListener('seeking', () => {
+            if (currentFilename) {
+                console.log('Seeking to time:', originalVideo.currentTime);
+                streamRetryCount = 0;
+                setTimeout(() => {
+                    processedVideo.src = `/stream/${currentFilename}?t=${originalVideo.currentTime}`;
+                }, retryDelay);
+            }
+        });
+
+        originalVideo.addEventListener('pause', () => {
+            if (currentFilename) {
+                console.log('Original video paused, time:', originalVideo.currentTime);
+                processedVideo.src = ''; // Clear the stream to pause
+                clearInterval(syncInterval);
+                syncInterval = null;
+                streamRetryCount = 0;
+                playPauseButton.textContent = 'Play Both';
+                statusElement.textContent = 'Both videos paused.';
+            }
+        });
+
+        originalVideo.addEventListener('play', () => {
+            if (currentFilename && !syncInterval) {
+                console.log('Original video playing, time:', originalVideo.currentTime);
+                streamRetryCount = 0;
+                setTimeout(() => {
+                    processedVideo.src = `/stream/${currentFilename}?t=${originalVideo.currentTime}`;
+                }, retryDelay);
+                syncInterval = setInterval(() => {
+                    if (!originalVideo.paused && currentFilename) {
+                        const expectedTime = originalVideo.currentTime;
+                        const currentStreamTime = parseFloat(processedVideo.src.split('t=')[1] || 0);
+                        const frameTime = 1.0 / 25; // 40ms per frame
+                        if (Math.abs(expectedTime - currentStreamTime) > frameTime / 2) {
+                            console.log('Play sync, time:', expectedTime);
+                            processedVideo.src = `/stream/${currentFilename}?t=${expectedTime}`;
+                        }
+                    }
+                }, 500); // Reduced sync frequency
+                playPauseButton.textContent = 'Pause Both';
+                statusElement.textContent = 'Both videos playing at 25 FPS.';
+            }
+        });
+    </script>
+</body>
+</html>
